@@ -4,20 +4,6 @@
 import sys
 import os
 import glob
-
-sys.path += glob.glob('%s/*.egg' % os.path.dirname(os.path.abspath(__file__)))
-
-try:
-    import gevent
-    import gevent.socket
-    import gevent.server
-    import gevent.queue
-    import gevent.event
-    import gevent.monkey
-    gevent.monkey.patch_all(subprocess=True)
-except ImportError:
-    gevent = None
-
 import base64
 import time
 import re
@@ -26,27 +12,18 @@ import thread
 import BaseHTTPServer
 import urllib2
 import urlparse
-try:
-    import OpenSSL
-except ImportError:
-    OpenSSL = None
-try:
-    import dnslib
-except ImportError:
-    dnslib = None
 
 
-from common import Common
-common = Common()
+from config import config
 
 class PacUtil(object):
     """GoAgent Pac Util"""
 
     @staticmethod
     def update_pacfile(filename):
-        listen_ip = common.LISTEN_IP
-        autoproxy = '%s:%s' % (listen_ip, common.LISTEN_PORT)
-        blackhole = '%s:%s' % (listen_ip, common.PAC_PORT)
+        listen_ip = config.LISTEN_IP
+        autoproxy = '%s:%s' % (listen_ip, config.LISTEN_PORT)
+        blackhole = '%s:%s' % (listen_ip, config.PAC_PORT)
 
         default = 'DIRECT'
         opener = urllib2.build_opener(urllib2.ProxyHandler({'http': autoproxy, 'https': autoproxy}))
@@ -66,16 +43,13 @@ class PacUtil(object):
             need_update = False
 
         try:
-            if common.PAC_ADBLOCK:
-                logging.info('try download %r to update_pacfile(%r)', common.PAC_ADBLOCK, filename)
-                adblock_content = opener.open(common.PAC_ADBLOCK).read()
-                logging.info('%r downloaded, try convert it with adblock2pac', common.PAC_ADBLOCK)
-                if 'gevent' in sys.modules and time.sleep is getattr(sys.modules['gevent'], 'sleep', None) and hasattr(gevent.get_hub(), 'threadpool'):
-                    jsrule = gevent.get_hub().threadpool.apply_e(Exception, PacUtil.adblock2pac, (adblock_content, 'FindProxyForURLByAdblock', blackhole, default))
-                else:
-                    jsrule = PacUtil.adblock2pac(adblock_content, 'FindProxyForURLByAdblock', blackhole, default)
+            if config.PAC_ADBLOCK:
+                logging.info('try download %r to update_pacfile(%r)', config.PAC_ADBLOCK, filename)
+                adblock_content = opener.open(config.PAC_ADBLOCK).read()
+                logging.info('%r downloaded, try convert it with adblock2pac', config.PAC_ADBLOCK)
+                jsrule = PacUtil.adblock2pac(adblock_content, 'FindProxyForURLByAdblock', blackhole, default)
                 content += '\r\n' + jsrule + '\r\n'
-                logging.info('%r downloaded and parsed', common.PAC_ADBLOCK)
+                logging.info('%r downloaded and parsed', config.PAC_ADBLOCK)
             else:
                 content += '\r\nfunction FindProxyForURLByAdblock(url, host) {return "DIRECT";}\r\n'
         except Exception as e:
@@ -85,15 +59,12 @@ class PacUtil(object):
             return
 
         try:
-            logging.info('try download %r to update_pacfile(%r)', common.PAC_GFWLIST, filename)
-            autoproxy_content = base64.b64decode(opener.open(common.PAC_GFWLIST).read())
-            logging.info('%r downloaded, try convert it with autoproxy2pac', common.PAC_GFWLIST)
-            if 'gevent' in sys.modules and time.sleep is getattr(sys.modules['gevent'], 'sleep', None) and hasattr(gevent.get_hub(), 'threadpool'):
-                jsrule = gevent.get_hub().threadpool.apply_e(Exception, PacUtil.autoproxy2pac, (autoproxy_content, 'FindProxyForURLByAutoProxy', autoproxy, default))
-            else:
-                jsrule = PacUtil.autoproxy2pac(autoproxy_content, 'FindProxyForURLByAutoProxy', autoproxy, default)
+            logging.info('try download %r to update_pacfile(%r)', config.PAC_GFWLIST, filename)
+            autoproxy_content = base64.b64decode(opener.open(config.PAC_GFWLIST).read())
+            logging.info('%r downloaded, try convert it with autoproxy2pac', config.PAC_GFWLIST)
+            jsrule = PacUtil.autoproxy2pac(autoproxy_content, 'FindProxyForURLByAutoProxy', autoproxy, default)
             content += '\r\n' + jsrule + '\r\n'
-            logging.info('%r downloaded and parsed', common.PAC_GFWLIST)
+            logging.info('%r downloaded and parsed', config.PAC_GFWLIST)
         except Exception as e:
             need_update = False
             logging.exception('update_pacfile failed: %r', e)
@@ -262,7 +233,7 @@ class PacUtil(object):
 
 class PACServerHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
-    pacfile = os.path.join(os.path.dirname(os.path.abspath(__file__)), common.PAC_FILE)
+    pacfile = os.path.join(os.path.dirname(os.path.abspath(__file__)), config.PAC_FILE)
     onepixel = b'GIF89a\x01\x00\x01\x00\x80\xff\x00\xc0\xc0\xc0\x00\x00\x00!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;'
 
     def address_string(self):
@@ -298,7 +269,7 @@ class PACServerHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 mimetype = 'application/octet-stream'
             if self.path.endswith('.pac?flush'):
                 thread.start_new_thread(PacUtil.update_pacfile, (self.pacfile,))
-            elif time.time() - os.path.getmtime(self.pacfile) > common.PAC_EXPIRED:
+            elif time.time() - os.path.getmtime(self.pacfile) > config.PAC_EXPIRED:
                 thread.start_new_thread(lambda: os.utime(self.pacfile, (time.time(), time.time())) or PacUtil.update_pacfile(self.pacfile), tuple())
             self.send_file(filename, mimetype)
         else:

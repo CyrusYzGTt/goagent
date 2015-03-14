@@ -5,7 +5,8 @@
 
 __version__ = '3.0.7'
 __password__ = ''
-__hostsdeny__ = ()  # __hostsdeny__ = ('.youtube.com', '.youku.com')
+__hostsdeny__ = ()
+#__hostsdeny__ = ('.youtube.com', '.youku.com', ".googlevideo.com")
 __content_type__ = 'image/gif'
 
 import sys

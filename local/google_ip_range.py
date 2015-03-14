@@ -1,16 +1,16 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # Based on checkgoogleip by  <moonshawdo@gmail.com>
-import ip_utils
-
-__author__ = ''
-
 import random
 import bisect
 import os
+import time
 
+import ip_utils
 
-class ip_range(object):
+random.seed(time.time()* 1000000)
+
+class Ip_range(object):
     def __init__(self):
         # change path to launcher
         global __file__
@@ -56,6 +56,7 @@ class ip_range(object):
             print "[",id,"]:", self.ip_range_map[id]
 
     def random_get_ip(self):
+
         while True:
             index = random.randint(0, self.candidate_amount_ip)
             id = bisect.bisect_left(self.ip_range_index, index)
@@ -78,6 +79,7 @@ class ip_range(object):
                 continue
             return ip
 
+ip_range = Ip_range()
 
 def test():
     proxy = ip_range()
@@ -87,6 +89,11 @@ def test():
         ip_addr = ip_utils.ip_num_to_string(ip)
         print "ip:", ip_addr
 
+def test_random():
+    #random.seed(time.time())
+    for i in range(1000):
+        index = random.randint(0, 1000 - 1)
+        print index
 
 if __name__ == '__main__':
-    test()
+    test_random()

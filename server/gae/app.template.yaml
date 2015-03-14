@@ -5,6 +5,10 @@ api_version: 1
 threadsafe: true
 
 handlers:
+- url: /_gh/.*
+  script: gae.application
+  secure: optional
+
 - url: /2
   script: wsgi.gae_application
   secure: optional
@@ -19,4 +23,4 @@ handlers:
 
 libraries:
 - name: pycrypto
-  version: "2.3"
+  version: "latest"

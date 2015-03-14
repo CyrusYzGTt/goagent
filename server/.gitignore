@@ -3,3 +3,4 @@
 *.pyc
 app.yaml
 .appcfg_cookies
+upload.log

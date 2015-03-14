@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
 # coding:utf-8
 # Based on GAppProxy 2.0.0 by Du XiaoGang <dugang.2008@gmail.com>
 # Based on WallProxy 0.4.0 by Hust Moon <www.ehust@gmail.com>
@@ -23,7 +23,6 @@
 #      Rui Wang          <isnowfy@gmail.com>
 #      Wang Wei Qiang    <wwqgtxx@gmail.com>
 #      Felix Yan         <felixonmars@gmail.com>
-#      Sui Feng          <suifeng.me@qq.com>
 #      QXO               <qxodream@gmail.com>
 #      Geek An           <geekan@foxmail.com>
 #      Poly Rabbit       <mcx_221@foxmail.com>
@@ -39,6 +38,21 @@
 
 import sys
 import os
+
+current_path = os.path.dirname(os.path.abspath(__file__))
+python_path = os.path.abspath( os.path.join(current_path, os.pardir, os.pardir, os.pardir, 'python27', '1.0'))
+
+noarch_lib = os.path.abspath( os.path.join(python_path, 'lib', 'noarch'))
+sys.path.append(noarch_lib)
+
+if sys.platform == "win32":
+    win32_lib = os.path.abspath( os.path.join(python_path, 'lib', 'win32'))
+    sys.path.append(win32_lib)
+elif sys.platform == "linux" or sys.platform == "linux2":
+    win32_lib = os.path.abspath( os.path.join(python_path, 'lib', 'linux'))
+    sys.path.append(win32_lib)
+
+
 import time
 import traceback
 
@@ -55,9 +69,7 @@ if os.path.islink(__file__):
     __file__ = getattr(os, 'readlink', lambda x: x)(__file__)
 work_path = os.path.dirname(os.path.abspath(__file__))
 os.chdir(work_path)
-sys.path += work_path
 
-from common import Common
 from cert_util import CertUtil
 import pac_server
 
@@ -65,9 +77,9 @@ import socket, ssl
 NetWorkIOError = (socket.error, ssl.SSLError, OSError)
 
 import proxy_handler
-import remote_control
+import web_control
 
-common = Common()
+from config import config
 
 
 
@@ -76,7 +88,11 @@ common = Common()
 def spawn_later(seconds, target, *args, **kwargs):
     def wrap(*args, **kwargs):
         __import__('time').sleep(seconds)
-        return target(*args, **kwargs)
+        try:
+            result = target(*args, **kwargs)
+        except:
+            result = None
+        return result
     return __import__('thread').start_new_thread(wrap, args, kwargs)
 
 
@@ -173,15 +189,15 @@ def pre_start():
             pass
     elif os.name == 'nt':
         import ctypes
-        ctypes.windll.kernel32.SetConsoleTitleW(u'GoAgent v%s' % common.__version__)
-        if not common.LISTEN_VISIBLE:
+        ctypes.windll.kernel32.SetConsoleTitleW(u'GoAgent v%s' % config.__version__)
+        if not config.LISTEN_VISIBLE:
             ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 0)
         else:
             ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 1)
-        if common.LOVE_ENABLE and random.randint(1, 100) <= 5:
+        if config.LOVE_ENABLE and random.randint(1, 100) <= 5:
             title = ctypes.create_unicode_buffer(1024)
             ctypes.windll.kernel32.GetConsoleTitleW(ctypes.byref(title), len(title)-1)
-            ctypes.windll.kernel32.SetConsoleTitleW('%s %s' % (title.value, random.choice(common.LOVE_TIP)))
+            ctypes.windll.kernel32.SetConsoleTitleW('%s %s' % (title.value, random.choice(config.LOVE_TIP)))
         blacklist = {'360safe': False,
                      'QQProtect': False, }
         softwares = [k for k, v in blacklist.items() if v]
@@ -193,46 +209,57 @@ def pre_start():
                 error = u'某些安全软件(如 %s)可能和本软件存在冲突，造成 CPU 占用过高。\n如有此现象建议暂时退出此安全软件来继续运行GoAgent' % ','.join(softwares)
                 ctypes.windll.user32.MessageBoxW(None, error, title, 0)
                 #sys.exit(0)
-    if common.GAE_APPIDS[0] == 'goagent':
-        logging.critical('please edit %s to add your appid to [gae] !', common.CONFIG_FILENAME)
+    if config.GAE_APPIDS[0] == 'goagent':
+        logging.critical('please edit %s to add your appid to [gae] !', config.CONFIG_FILENAME)
         sys.exit(-1)
-    if common.PAC_ENABLE:
-        pac_ip = common.PAC_IP
-        url = 'http://%s:%d/%s' % (pac_ip, common.PAC_PORT, common.PAC_FILE)
+    if config.PAC_ENABLE:
+        pac_ip = config.PAC_IP
+        url = 'http://%s:%d/%s' % (pac_ip, config.PAC_PORT, config.PAC_FILE)
         spawn_later(600, urllib2.build_opener(urllib2.ProxyHandler({})).open, url)
 
 
 def main():
+    # to profile goagent, run proxy.py, visit some web by proxy, then visit http://127.0.0.1:8084/quit to quit and print result.
+    do_profile = False
+    if do_profile:
+        import cProfile, pstats
+        pr = cProfile.Profile()
+        pr.enable()
+
     global __file__
     __file__ = os.path.abspath(__file__)
     if os.path.islink(__file__):
         __file__ = getattr(os, 'readlink', lambda x: x)(__file__)
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
-    logging.basicConfig(level=logging.DEBUG if common.LISTEN_DEBUGINFO else logging.INFO, format='%(levelname)s - %(asctime)s %(message)s', datefmt='[%b %d %H:%M:%S]')
+    logging.basicConfig(level=logging.DEBUG if config.LISTEN_DEBUGINFO else logging.INFO, format='%(levelname)s - %(asctime)s %(message)s', datefmt='[%b %d %H:%M:%S]')
     pre_start()
-    logging.info(common.info())
+    logging.info(config.info())
 
-    if common.PAC_ENABLE:
-        server = LocalProxyServer((common.PAC_IP, common.PAC_PORT), pac_server.PACServerHandler)
+    if config.PAC_ENABLE:
+        server = LocalProxyServer((config.PAC_IP, config.PAC_PORT), pac_server.PACServerHandler)
         p = threading.Thread(target=server.serve_forever)
         p.setDaemon(True)
         p.start()
 
-    if common.CONTROL_ENABLE:
-        control_server = LocalProxyServer((common.CONTROL_IP, common.CONTROL_PORT), remote_control.RemoveContralServerHandler)
+    if config.CONTROL_ENABLE:
+        control_server = LocalProxyServer((config.CONTROL_IP, config.CONTROL_PORT), web_control.RemoteContralServerHandler)
         p = threading.Thread(target=control_server.serve_forever)
         p.setDaemon(True)
         p.start()
 
-    server = LocalProxyServer((common.LISTEN_IP, common.LISTEN_PORT), proxy_handler.GAEProxyHandler)
+    server = LocalProxyServer((config.LISTEN_IP, config.LISTEN_PORT), proxy_handler.GAEProxyHandler)
     p = threading.Thread(target=server.serve_forever)
     p.setDaemon(True)
     p.start()
 
-    CertUtil.check_ca()
+    CertUtil.init_ca()
 
-    while True:
-        time.sleep(100000)
+    while config.keep_run:
+        time.sleep(1)
+
+    if do_profile:
+        pr.disable()
+        pr.print_stats()
 
 if __name__ == '__main__':
     try:

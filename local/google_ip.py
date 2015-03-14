@@ -1,53 +1,86 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-# base on checkgoogleip 'moonshawdo@gmail.com'
+# based on checkgoogleip 'moonshawdo@gmail.com'
 
-# Note: domain ip list is still not used now.
-#  not known how to use them now.
 
 import threading
 import operator
 import time
 
 import ip_utils
-import ssl_wrap
-import google_ip_range
+import check_ip
+from google_ip_range import ip_range
 import logging
+import random
+import Queue
+import math
+import os
+from config import config
+import traceback
 
+good_ip_file_name = "good_ip.txt"
+good_ip_file = os.path.abspath( os.path.join(config.DATA_PATH, good_ip_file_name))
 
 
 # const value:
-max_check_ip_thread_num = 10
-min_good_ip_num = 40
-max_good_ip_num = 50
-timeout = 5000 # 5 second
+max_check_ip_thread_num = 5
+max_good_ip_num = 4000  # stop scan ip when enough
 
 
 class Check_ip():
     ncount = 0
     ncount_lock = threading.Lock()
 
-    ip_range_manager = google_ip_range.ip_range()
-    ssl_check = ssl_wrap.ssl_check()
+    to_remove_ip_list = Queue.Queue()
+    remove_ip_thread_num = 0
+    remove_ip_thread_num_lock = threading.Lock()
 
-    ip_dict = {} # ip_str => { 'conn_time'=>?, 'domain'=>, 'server'=>?}
-    domain_ip_list = {} # domain => [ip, ...]
-    gws_ip_list = [] # gererate from ip_dict, sort by conn_time, when get_batch_ip
+    ip_dict = {} # ip_str => {
+                 # 'handshake_time'=>?ms,
+                 # 'domain'=>CN,
+                 # 'server'=>gws/gvs?,
+                 # 'timeout'=>? , continue timeout num, if connect success, reset to 0
+                 # history=>[[time,status], []]
+                 # }
+
+    gws_ip_list = [] # gererate from ip_dict, sort by handshake_time, when get_batch_ip
     ip_lock = threading.Lock()
     iplist_need_save = 0
-    last_sort_time = 0
-    last_sort_time_for_domain = {}
+    iplist_saved_time = 0
+    last_sort_time_for_gws = 0  # keep status for avoid wast too many cpu
+
+    network_fail_time = 0 # keep status for avoid retry too frequently
+
+    # algorithm to get ip:
+    # scan start from fastest ip
+    # always use the fastest ip.
+    # if the ip is used in 5 seconds, try next ip;
+    # if the ip is fail in 60 seconds, try next ip;
+    # reset pointer to front every 3 seconds
+    gws_ip_pointer = 0
+    gws_ip_pointer_reset_time = 0
+
+    def is_ip_enough(self):
+        if len(self.gws_ip_list) >= max_good_ip_num:
+            return True
+        else:
+            return False
 
     def __init__(self):
         self.load_ip()
 
-        if len(self.gws_ip_list) < min_good_ip_num:
+        if not self.is_ip_enough():
             self.search_more_google_ip()
 
     def load_ip(self):
-        try:
-            fd = open("good_ip.txt", "r")
-            for line in fd.readlines():
+        if not os.path.isfile(good_ip_file):
+            return
+
+        with open(good_ip_file, "r") as fd:
+            lines = fd.readlines()
+
+        for line in lines:
+            try:
                 str_l = line.split(' ')
                 if len(str_l) != 4:
                     logging.warning("line err: %s", line)
@@ -55,180 +88,338 @@ class Check_ip():
                 ip_str = str_l[0]
                 domain = str_l[1]
                 server = str_l[2]
-                conn_time = int(str_l[3])
+                handshake_time = int(str_l[3])
 
-                #logging.info("load ip: %s time:%d domain:%s server:%s", ip_str, conn_time, domain, server)
-                self.set_ip(ip_str, conn_time, domain, server)
-            fd.close()
-            logging.info("load google iplist num: %d, gws num:%d", len(self.ip_dict), len(self.gws_ip_list))
+                #logging.info("load ip: %s time:%d domain:%s server:%s", ip_str, handshake_time, domain, server)
+                self.add_ip(ip_str, handshake_time, domain, server)
+            except Exception as e:
+                logging.exception("load_ip line:%s err:%s", line, e)
 
+        logging.info("load google ip_list num:%d, gws num:%d", len(self.ip_dict), len(self.gws_ip_list))
+        self.try_sort_ip_by_handshake_time(force=True)
+
+        if False:
             p = threading.Thread(target = self.check_exist_ip)
             p.daemon = True
             p.start()
-        except Exception as e:
-            logging.warn("load google good ip fail: %s", e)
 
-    def save_ip_list(self):
-        if self.iplist_need_save == 0:
-            return
+    def save_ip_list(self, force=False):
+        if not force:
+            if self.iplist_need_save == 0:
+                return
+            if time.time() - self.iplist_saved_time < 10:
+                return
+
+        self.iplist_saved_time = time.time()
 
         try:
             self.ip_lock.acquire()
-            with open("good_ip.txt", "w") as fd:
+            with open(good_ip_file, "w") as fd:
                 for ip_str, property in self.ip_dict.items():
-                    fd.write( "%s %s %s %d\n" % (ip_str, property['domain'], property['server'], property['conn_time']) )
+                    fd.write( "%s %s %s %d\n" % (ip_str, property['domain'], property['server'], property['handshake_time']) )
             self.iplist_need_save = 0
         except Exception as e:
             logging.error("save good_ip.txt fail %s", e)
         finally:
             self.ip_lock.release()
 
-    def set_ip(self, ip_str, conn_time, domain=None, server=None):
-        conn_time = int(conn_time)
-        if conn_time >= timeout:
-            self.remove_ip(ip_str)
+    def try_sort_ip_by_handshake_time(self, force=False):
+        if time.time() - self.last_sort_time_for_gws < 10 and not force:
             return
+        self.last_sort_time_for_gws = time.time()
 
-        self.iplist_need_save = 1
+        self.ip_lock.acquire()
+        try:
+            ip_dict_handshake_time = {}
+            for ip_str in self.ip_dict:
+                if 'gws' not in self.ip_dict[ip_str]['server']:
+                    continue
+                ip_dict_handshake_time[ip_str] = self.ip_dict[ip_str]['handshake_time']
+
+            ip_time = sorted(ip_dict_handshake_time.items(), key=operator.itemgetter(1))
+            self.gws_ip_list = [ip_str for ip_str,handshake_time in ip_time]
+
+        except Exception as e:
+            logging.error("try_sort_ip_by_handshake_time:%s", e)
+        finally:
+            self.ip_lock.release()
+
+        time_cost = (( time.time() - self.last_sort_time_for_gws) * 1000)
+        logging.debug("sort ip time:%d", time_cost) # 5ms for 1000 ip.
+
+    def get_gws_ip(self):
+        self.try_sort_ip_by_handshake_time()
+
+        self.ip_lock.acquire()
+        try:
+            while True:
+                ip_num = len(self.gws_ip_list)
+                if ip_num == 0:
+                    #logging.warning("no gws ip")
+                    time.sleep(1)
+                    return None
+
+
+                if self.gws_ip_pointer >= ip_num:
+                    if time.time() - self.gws_ip_pointer_reset_time < 1:
+                        time.sleep(1)
+                        continue
+                    else:
+                        self.gws_ip_pointer = 0
+                        self.gws_ip_pointer_reset_time = time.time()
+                elif self.gws_ip_pointer > 0 and time.time() - self.gws_ip_pointer_reset_time > 3:
+                    self.gws_ip_pointer = 0
+                    self.gws_ip_pointer_reset_time = time.time()
+
+                #fastest_num = min(ip_num-1, 20)
+                #index = random.randint(0, fastest_num)
+                #index = get_random_pr(fastest_num)
+                ip_str = self.gws_ip_list[self.gws_ip_pointer]
+                get_time = self.ip_dict[ip_str]["get_time"]
+                if time.time() - get_time < 10:
+                    self.gws_ip_pointer += 1
+                    continue
+                handshake_time = self.ip_dict[ip_str]["handshake_time"]
+                fail_time = self.ip_dict[ip_str]["fail_time"]
+                if time.time() - fail_time < 300:
+                    self.gws_ip_pointer += 1
+                    continue
+
+                logging.debug("get ip:%s t:%d", ip_str, handshake_time)
+                self.ip_dict[ip_str]['history'].append([time.time(), "get"])
+                self.ip_dict[ip_str]['get_time'] = time.time()
+                self.gws_ip_pointer += 1
+                return ip_str
+        except Exception as e:
+            logging.error("get_gws_ip fail:%s", e)
+            traceback.print_exc()
+        finally:
+            self.ip_lock.release()
+
+    def get_host_ip(self, host):
+        self.try_sort_ip_by_handshake_time()
+
+        self.ip_lock.acquire()
+        try:
+            ip_num = len(self.ip_dict)
+            if ip_num == 0:
+                #logging.warning("no gws ip")
+                time.sleep(1)
+                return None
+
+            for ip_str in self.ip_dict:
+                domain = self.ip_dict[ip_str]["domain"]
+                if domain != host:
+                    continue
+
+                get_time = self.ip_dict[ip_str]["get_time"]
+                if time.time() - get_time < 10:
+                    continue
+                handshake_time = self.ip_dict[ip_str]["handshake_time"]
+                fail_time = self.ip_dict[ip_str]["fail_time"]
+                if time.time() - fail_time < 300:
+                    continue
+
+                logging.debug("get host:%s ip:%s t:%d", host, ip_str, handshake_time)
+                self.ip_dict[ip_str]['history'].append([time.time(), "get"])
+                self.ip_dict[ip_str]['get_time'] = time.time()
+                return ip_str
+        except Exception as e:
+            logging.error("get_gws_ip fail:%s", e)
+            traceback.print_exc()
+        finally:
+            self.ip_lock.release()
+
+    def add_ip(self, ip_str, handshake_time, domain=None, server=None):
+        if not isinstance(ip_str, basestring):
+            logging.error("add_ip input")
+
+        handshake_time = int(handshake_time)
+
         self.ip_lock.acquire()
         try:
             if ip_str in self.ip_dict:
-                self.ip_dict[ip_str]['conn_time'] = conn_time
+                self.ip_dict[ip_str]['handshake_time'] = handshake_time
+                self.ip_dict[ip_str]['timeout'] = 0
+                self.ip_dict[ip_str]['history'].append([time.time(), handshake_time])
+                return False
+
+            self.iplist_need_save = 1
+
+            self.ip_dict[ip_str] = {'handshake_time':handshake_time, 'domain':domain, 'server':server,
+                                    'timeout':0, "history":[[time.time(), handshake_time]], "fail_time":0,
+                                    "get_time":0}
+
+            if 'gws' in server:
+                self.gws_ip_list.append(ip_str)
+            return True
+        except Exception as e:
+            logging.error("set_ip err:%s", e)
+        finally:
+            self.ip_lock.release()
+        return False
+
+    def update_ip(self, ip_str, handshake_time):
+        if not isinstance(ip_str, basestring):
+            logging.error("set_ip input")
+
+        handshake_time = int(handshake_time)
+        if handshake_time < 5: # this is impossible
+            return
+
+        self.ip_lock.acquire()
+        try:
+            if ip_str in self.ip_dict:
+
+                # Case: some good ip, average handshake time is 300ms
+                # some times ip package lost cause handshake time become 2000ms
+                # this ip will not return back to good ip front until all become bad
+                # There for, prevent handshake time increase too quickly.
+                org_time = self.ip_dict[ip_str]['handshake_time']
+                if handshake_time - org_time > 100:
+                    self.ip_dict[ip_str]['handshake_time'] = org_time + 100
+                else:
+                    self.ip_dict[ip_str]['handshake_time'] = handshake_time
+
+                self.ip_dict[ip_str]['timeout'] = 0
+                self.ip_dict[ip_str]['history'].append([time.time(), handshake_time])
+                self.ip_dict[ip_str]["fail_time"] = 0
                 return
 
-            else:
-                if domain==None or server==None:
-                    # update connect time only
-                    return
+            #logging.debug("update ip:%s not exist", ip_str)
+        except Exception as e:
+            logging.error("update_ip err:%s", e)
+        finally:
+            self.ip_lock.release()
 
-                self.ip_dict[ip_str] = {'conn_time':conn_time, 'domain':domain, 'server':server}
 
-                if domain not in self.domain_ip_list:
-                    self.domain_ip_list[domain] = []
-                self.domain_ip_list[domain].append(ip_str)
-                if 'gws' in server:
-                    self.gws_ip_list.append(ip_str)
 
+    def report_connect_fail(self, ip_str, force_remove=False):
+        # ignore if system network is disconnected.
+        if time.time() - self.network_fail_time < 3:
+            return
+        if not force_remove and not self.network_is_ok():
+            return
+
+        self.ip_lock.acquire()
+        try:
+            if not ip_str in self.ip_dict:
+                return
+
+            fail_time = self.ip_dict[ip_str]["fail_time"]
+            if time.time() - fail_time < 1:
+                return
+
+            # increase handshake_time to make it can be used in lower probability
+            self.ip_dict[ip_str]['handshake_time'] += 200
+            self.ip_dict[ip_str]['timeout'] += 1
+            self.ip_dict[ip_str]['history'].append([time.time(), "fail"])
+            self.ip_dict[ip_str]["fail_time"] = time.time()
+
+            if force_remove or self.ip_dict[ip_str]['timeout'] >= 2:
+                property = self.ip_dict[ip_str]
+                server = property['server']
+                del self.ip_dict[ip_str]
+
+                if 'gws' in server and ip_str in self.gws_ip_list:
+                    self.gws_ip_list.remove(ip_str)
+
+                logging.info("remove ip:%s left amount:%d gws_num:%d", ip_str, len(self.ip_dict), len(self.gws_ip_list))
+
+                self.to_remove_ip_list.put(ip_str)
+                self.try_remove_thread()
         except Exception as e:
             logging.error("set_ip err:%s", e)
         finally:
             self.ip_lock.release()
 
-    def remove_ip(self, ip_str):
-        self.ip_lock.acquire()
 
-        if ip_str not in self.ip_dict:
-            self.ip_lock.release()
-            return
-
-
-        try:
-            property = self.ip_dict[ip_str]
-            domain = property['domain']
-            server = property['server']
-            del self.ip_dict[ip_str]
-            self.domain_ip_list[domain].remove(ip_str)
-
-            if 'gws' in server and ip_str in self.gws_ip_list:
-                self.gws_ip_list.remove(ip_str)
-
-        except Exception as e:
-            logging.warn("remove_ip fail %s", e)
-        finally:
-            self.ip_lock.release()
-
-        logging.info("remove gae ip:%s left amount:%d gws_num:%d", ip_str, len(self.ip_dict), len(self.gws_ip_list))
-
-        if len(self.gws_ip_list) < min_good_ip_num:
+        if not self.is_ip_enough():
             self.search_more_google_ip()
 
-    def get_batch_ip(self, num = 1):
-        self.ip_lock.acquire()
-        ret_list = []
+
+    def try_remove_thread(self):
+        if self.remove_ip_thread_num > 0:
+            return
+
+        self.remove_ip_thread_num_lock.acquire()
+        self.remove_ip_thread_num += 1
+        self.remove_ip_thread_num_lock.release()
+
+        p = threading.Thread(target=self.remove_ip_process)
+        p.daemon = True
+        p.start()
+
+    def remove_ip_process(self):
         try:
-            if time.time() - self.last_sort_time > 10:
-                ip_dict_conn_time = {}
-                for ip_str in self.ip_dict:
-                    if 'gws' not in self.ip_dict[ip_str]['server']:
-                        continue
-                    ip_dict_conn_time[ip_str] = self.ip_dict[ip_str]['conn_time']
-                self.gws_ip_list = sorted(ip_dict_conn_time.items(), key=operator.itemgetter(1))
-                self.last_sort_time = time.time()
+            while True:
 
-            if len(self.gws_ip_list) == 0:
-                logging.warning("no gws ip")
-                return []
-
-            i = 0
-            for (ip_str, _) in self.gws_ip_list:
-                ret_list.append( ip_str)
-                i += 1
-                if i >= num:
+                try:
+                    ip_str = self.to_remove_ip_list.get_nowait()
+                except:
                     break
-        except Exception as e:
-            logging.error("get_batch_ip fail:%s", e)
+
+                result = check_ip.test(ip_str)
+                if result and result.appspot_ok:
+                    self.add_ip(ip_str, result.handshake_time, result.domain, result.server_type)
+                    logging.debug("remove ip process, restore ip:%s", ip_str)
+                    continue
+
+                if not self.network_is_ok():
+                    self.to_remove_ip_list.put(ip_str)
+                    logging.warn("network is unreachable. check your network connection.")
+                    return
+
+                logging.info("real remove ip:%s ", ip_str)
+
+            #self.check_exist_ip()
         finally:
-            self.ip_lock.release()
-        return ret_list
+            self.remove_ip_thread_num_lock.acquire()
+            self.remove_ip_thread_num -= 1
+            self.remove_ip_thread_num_lock.release()
 
-    def get_domain_batch_ip(self, domain, num = 1):
+    def network_is_ok(self):
+        if time.time() - self.network_fail_time < 3:
+            return False
 
-        self.ip_lock.acquire()
-        try:
-            if domain not in self.last_sort_time_for_domain or time.time() - self.last_sort_time_for_domain[domain] > 10:
-                ip_dict_conn_time = {}
-                for ip_str in self.ip_dict:
-                    if domain != self.ip_dict[ip_str]['domain']:
-                        continue
-                    ip_dict_conn_time[ip_str] = self.ip_dict[ip_str]['conn_time']
-                self.domain_ip_list[domain] = sorted(ip_dict_conn_time.items(), key=operator.itemgetter(1))
-                self.last_sort_time_for_domain[domain] = time.time()
+        if check_ip.network_is_ok():
+            return True
 
-            if domain not in self.domain_ip_list or len(self.domain_ip_list[domain]) == 0:
-                ret_list = []
-                logging.warn("no domain ip for %s", domain)
-                return []
+        self.network_fail_time = time.time()
+        return False
 
-            i = 0
-            ret_list = []
-            for (ip_str, _) in self.domain_ip_list[domain]:
-                ret_list.append( ip_str)
-                i += 1
-                if i >= num:
-                    break
-        except Exception as e:
-            logging.warn("get_domain_batch_ip %s fail:%s", domain, e)
-        finally:
-            self.ip_lock.release()
-        return ret_list
+
+
+
+    def check_ip(self, ip_str):
+        result = check_ip.test_gws(ip_str)
+        if not result:
+            return False
+
+        if self.add_ip(ip_str, result.handshake_time, result.domain, result.server_type):
+            #logging.info("add  %s  CN:%s  type:%s  time:%d  gws:%d ", ip_str,
+            #     result.domain, result.server_type, result.handshake_time, len(self.gws_ip_list))
+            logging.info("check_ip add ip:%s time:%d", ip_str, result.handshake_time)
+
+        return True
 
     def runJob(self):
-        while len(self.gws_ip_list) < max_good_ip_num:
+        while not self.is_ip_enough():
             try:
                 time.sleep(1)
-                ip_int = self.ip_range_manager.get_ip()
+                ip_int = ip_range.get_ip()
                 ip_str = ip_utils.ip_num_to_string(ip_int)
-
-                (domain, conn_time, timeout, server) = self.ssl_check.get_ssl_domain(ip_str)
-                if timeout == 1 or domain == None:
-                    continue
-                server = server.replace(" ", "_")
-                if server == '':
-                    server = '_'
-                if not "gws" in server:
-                    continue
-
-                logging.info("add ip:%s domain:%s server:%s conn_time:%d", ip_str, domain, server, conn_time)
-                self.set_ip(ip_str, conn_time, domain, server)
-                self.save_ip_list()
+                if self.check_ip(ip_str):
+                    self.save_ip_list()
             except Exception as e:
-                logging.warn("google_ip.runJum fail:%s", e)
+                logging.warn("google_ip.runJob fail:%s", e)
 
         self.ncount_lock.acquire()
         self.ncount -= 1
         self.ncount_lock.release()
 
     def search_more_google_ip(self):
+
         while self.ncount < max_check_ip_thread_num:
             self.ncount_lock.acquire()
             self.ncount += 1
@@ -238,31 +429,92 @@ class Check_ip():
             p.start()
 
     def check_exist_ip(self):
+
         self.ip_lock.acquire()
         tmp_ip_list = [x for x in self.gws_ip_list]
         self.ip_lock.release()
 
         for ip_str in tmp_ip_list:
-            (domain, conn_time, timeout, server) = self.ssl_check.get_ssl_domain(ip_str)
-            if timeout == 1 or domain == None:
-                self.remove_ip(ip_str)
+
+            result = check_ip.test_gws(ip_str)
+            if not result:
+                if not self.network_is_ok():
+                    logging.warn("check_exist_ip network is fail, check your network connection.")
+                    return
+
+                logging.info("check_exist_ip fail ip:%s ", ip_str)
+                self.report_connect_fail(ip_str, force_remove=True)
             else:
-                self.set_ip(ip_str, conn_time)
-            self.save_ip_list()
+                self.update_ip(ip_str, result.handshake_time)
+                logging.info("check_exist_ip update ip:%s server:%s time:%d", ip_str, result.server_type, result.handshake_time)
+
+            time.sleep(1)
+
+        self.save_ip_list()
+
+if __name__ != "__main__":
+    google_ip = Check_ip()
 
 
 def test():
     check = Check_ip()
     check.search_more_google_ip()
     #check.test_ip("74.125.130.98", print_result=True)
-    while True:
+    while not check.is_ip_enough():
         time.sleep(10)
 
-if __name__ == '__main__':
+def test_profile():
+    do_profile = True
+    if do_profile:
+        import cProfile, pstats
+        pr = cProfile.Profile()
+        pr.enable()
+
     test()
 
+    if do_profile:
+        pr.disable()
+        pr.print_stats(sort="cum")
+
+def test_network():
+    check = Check_ip()
+    res = check.network_is_ok()
+    print res
+
+def get_random_pr(num):
+    n0 = num
+    r = 2
+
+    for i in range(r):
+        n0 = n0 * n0
+
+    n1 = random.randint(0, n0)
+    for i in range(r):
+        n1 = math.sqrt(n1)
+
+    n2 = num - n1
+    return int(n2 )
+
+def test_random():
+    result = {}
+    for i in range(300):
+        v = get_random_pr(30)
+        if not v in result:
+            result[v] = 0
+        result[v] += 1
+    for k in result:
+        print k, result[k]
+
+if __name__ == '__main__':
+    test_random()
 # test cast
 # 1. good_ip.txt not exist when startup, auto scan good ip, then save
 # 2. good_ip.txt exist, load ip list, and check it.
-# 3. get_batch_ip(num)
-# 4. set_ip(ip, conn_time), try remove ip
+#
+
+
+# google ip study about gvs
+# each xx.googlevideo.com only have one ip
+# and there is many many googlevideo ip and many many xx.googlevideo.com domain
+# if GFW block some of the ip, direct connect to these domain if fail.
+# There for, gvs can't direct connect if GFW block some some of it.

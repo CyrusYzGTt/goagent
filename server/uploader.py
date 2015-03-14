@@ -5,13 +5,14 @@ import sys
 import os
 import re
 import socket
+import time
 
 code_path = os.path.dirname(os.path.abspath(__file__))
 os.chdir(code_path)
 
 
 sys.modules.pop('google', None)
-lib_path = os.path.join(code_path, "google_appengine.zip")
+lib_path = os.path.join(code_path, "lib")
 sys.path.insert(0, lib_path)
 
 import mimetypes
@@ -93,15 +94,24 @@ def upload(appid, email, password):
     with open(filename, 'wb') as fp:
         fp.write(re.sub(r'application:\s*\S+', 'application: '+appid, yaml))
 
-    try:
-        result =  appcfg.AppCfgApp(['appcfg', 'rollback', dirname], password_input_fn=getpass_getpass, raw_input_fn=my_input, error_fh=my_stdout).Run()
-        result =  appcfg.AppCfgApp(['appcfg', 'update', dirname], password_input_fn=getpass_getpass, raw_input_fn=my_input, error_fh=my_stdout).Run()
-    except Exception as e:
-        my_stdout.write("upload  fail: %s\n\n" % e)
+    for i in range(10):
+        try:
+            result =  appcfg.AppCfgApp(['appcfg', 'rollback', dirname], password_input_fn=getpass_getpass, raw_input_fn=my_input, error_fh=my_stdout).Run()
+            if result == 1:
+                continue
+            result =  appcfg.AppCfgApp(['appcfg', 'update', dirname], password_input_fn=getpass_getpass, raw_input_fn=my_input, error_fh=my_stdout).Run()
+            if result == 1:
+                continue
+            break
+        except Exception as e:
+            my_stdout.write("upload  fail: %s\n\n" % e)
+            if i < 9:
+                my_stdout.write("Retry again.\n\n")
+                time.sleep(1)
 
-    os.remove(filename)
 
     try:
+        os.remove(filename)
         os.remove(appengine_rpc.HttpRpcServer.DEFAULT_COOKIE_FILE_PATH)
     except OSError:
         pass
@@ -111,6 +121,31 @@ def upload(appid, email, password):
 def println(s, file=sys.stderr):
     assert type(s) is type(u'')
     file.write(s.encode(sys.getfilesystemencoding(), 'replace') + os.linesep)
+
+def appid_is_valid(appid):
+    if len(appid) < 6:
+        my_stdout.write("appid wrong:%s\n" % appid)
+        return False
+    if not re.match(r'[0-9a-zA-Z\-|]+', appid):
+        my_stdout.write(u'appid:%s format err, check http://appengine.google.com !' % appid)
+        return False
+    if any(x in appid.lower() for x in ('ios', 'android', 'mobile')):
+        my_stdout.write(u'appid:%s format err, check http://appengine.google.com !' % appid)
+        my_stdout.write(u'appid 不能包含 ios/android/mobile 等字样。')
+        return False
+    return True
+
+def uploads(appids, email, password):
+
+    for appid in appids.split('|'):
+        if appid == "":
+            continue
+        if not appid_is_valid(appid):
+            continue
+        upload(appid, email, password)
+
+    my_stdout.write("== END ==\n\n")
+    do_clean_up()
 
 def main():
     if len(sys.argv) <3:
@@ -128,22 +163,7 @@ def main():
         import getpass
         password = getpass.getpass("password:")
 
-    if not re.match(r'[0-9a-zA-Z\-|]+', appids):
-        my_stdout.write(u'appid format err, check http://appengine.google.com !')
-        my_stdout.write("== END ==\n\n")
-        sys.exit(-1)
-    if any(x in appids.lower() for x in ('ios', 'android', 'mobile')):
-        println(u'appid 不能包含 ios/android/mobile 等字样。')
-        my_stdout.write("appid wrong!!!\n")
-        my_stdout.write("Don't include ios/android/mobile in appid !\n")
-        my_stdout.write("== END ==\n\n")
-        sys.exit(-1)
-
-    for appid in appids.split('|'):
-        upload(appid, email, password)
-
-    my_stdout.write("== END ==\n\n")
-    do_clean_up()
+    uploads(appids, email, password)
 
 if __name__ == '__main__':
     main()
