@@ -30,10 +30,12 @@ import cgi
 import urllib2
 import sys
 import datetime
+import locale
+
 
 import logging
 from config import config
-
+from appids_manager import appid_manager
 from google_ip import google_ip
 import connect_manager
 import ConfigParser
@@ -56,6 +58,8 @@ class User_config(object):
     proxy_passwd = ""
 
     def __init__(self):
+        self.host_appengine_mode = "gae"
+        self.ip_connect_interval = ""
         self.load()
 
     def load(self):
@@ -75,12 +79,23 @@ class User_config(object):
             except:
                 pass
 
+            try:
+                self.host_appengine_mode = CONFIG.get('hosts', 'appengine.google.com')
+            except:
+                pass
+
+            try:
+                self.ip_connect_interval = CONFIG.getint('google_ip', 'ip_connect_interval')
+            except:
+                pass
+
             self.proxy_enable = CONFIG.get('proxy', 'enable')
             self.proxy_type = CONFIG.get('proxy', 'type')
             self.proxy_host = CONFIG.get('proxy', 'host')
             self.proxy_port = CONFIG.get('proxy', 'port')
             self.proxy_user = CONFIG.get('proxy', 'user')
             self.proxy_passwd = CONFIG.get('proxy', 'passwd')
+
         except Exception as e:
             logging.warn("User_config.load except:%s", e)
 
@@ -92,13 +107,24 @@ class User_config(object):
                 f.write("[gae]\n")
                 f.write("appid = %s\n" % self.appid)
                 f.write("password = %s\n\n" % self.password)
+
             f.write("[proxy]\n")
             f.write("enable = %s\n" % self.proxy_enable)
             f.write("type = %s\n" % self.proxy_type)
             f.write("host = %s\n" % self.proxy_host)
             f.write("port = %s\n" % self.proxy_port)
             f.write("user = %s\n" % self.proxy_user)
-            f.write("passwd = %s\n" % self.proxy_passwd)
+            f.write("passwd = %s\n\n" % self.proxy_passwd)
+
+            if self.host_appengine_mode != "gae":
+                f.write("[hosts]\n")
+                f.write("appengine.google.com = %s\n\n" % self.host_appengine_mode)
+                f.write(".google.com = %s\n\n" % self.host_appengine_mode)
+
+            if self.ip_connect_interval != "":
+                f.write("[google_ip]\n")
+                f.write("ip_connect_interval = %d\n\n" % int(self.ip_connect_interval))
+
             f.close()
         except:
             logging.warn("launcher.config save user config fail:%s", CONFIG_USER_FILENAME)
@@ -169,6 +195,7 @@ def http_request(url, method="GET"):
 class RemoteContralServerHandler(BaseHTTPServer.BaseHTTPRequestHandler):
     deploy_proc = None
 
+
     def address_string(self):
         return '%s:%s' % self.client_address[:2]
 
@@ -180,7 +207,7 @@ class RemoteContralServerHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         try:
             refer = self.headers.getheader('Referer')
             netloc = urlparse.urlparse(refer).netloc
-            if not "127.0.0.1" in netloc:
+            if not netloc.startswith("127.0.0.1") and not netloc.startswitch("localhost"):
                 logging.warn("web control ref:%s refuse", netloc)
                 return
         except:
@@ -201,6 +228,8 @@ class RemoteContralServerHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             return self.req_ip_list_handler()
         elif path == "/ssl_pool":
             return self.req_ssl_pool_handler()
+        elif path == "/is_ready":
+            return self.req_is_ready_handler()
         elif path == "/quit":
             config.keep_run = False
             data = "Quit"
@@ -238,7 +267,7 @@ class RemoteContralServerHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         try:
             refer = self.headers.getheader('Referer')
             netloc = urlparse.urlparse(refer).netloc
-            if not "127.0.0.1" in netloc:
+            if not netloc.startswith("127.0.0.1") and not netloc.startswitch("localhost"):
                 logging.warn("web control ref:%s refuse", netloc)
                 return
         except:
@@ -334,6 +363,34 @@ class RemoteContralServerHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             logging.exception("xxnet_version fail")
         return "get_version_fail"
 
+    def get_os_language(self):
+        if hasattr(self, "lang_code"):
+            return self.lang_code
+
+        try:
+            lang_code, code_page = locale.getdefaultlocale()
+            #('en_GB', 'cp1252'), en_US,
+            self.lang_code = lang_code
+            return lang_code
+        except:
+            #Mac fail to run this
+            pass
+
+        if sys.platform == "darwin":
+            try:
+                oot = os.pipe()
+                p = subprocess.Popen(["/usr/bin/defaults", 'read', 'NSGlobalDomain', 'AppleLanguages'],stdout=oot[1])
+                p.communicate()
+                lang_code = os.read(oot[0],10000)
+                self.lang_code = lang_code
+                return lang_code
+            except:
+                pass
+
+        lang_code = 'Unknown'
+        return lang_code
+
+
     def req_status_handler(self):
         if "user-agent" in self.headers.dict:
             user_agent = self.headers.dict["user-agent"]
@@ -349,14 +406,21 @@ class RemoteContralServerHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                    "os_release":platform.release(),
                    "architecture":platform.architecture(),
                    "os_detail":os_detail(),
+                   "language":self.get_os_language(),
                    "browser":user_agent,
                    "xxnet_version":RemoteContralServerHandler.xxnet_version(),
                    "launcher_version":launcher_version,
                    "goagent_version": config.__version__,
                    "python_version": config.python_version,
                    "proxy_listen":config.LISTEN_IP + ":" + str(config.LISTEN_PORT),
-                   "gae_appid":config.GAE_APPIDS,
-                   "pac_url":config.pac_url}
+                   "gae_appid":"|".join(config.GAE_APPIDS),
+                   "connected_link":"%d" % len(connect_manager.https_manager.conn_pool.pool),
+                   "working_appid":"|".join(appid_manager.working_appid_list),
+                   "out_of_quota_appids":"|".join(appid_manager.out_of_quota_appids),
+                   "not_exist_appids":"|".join(appid_manager.not_exist_appids),
+                   "pac_url":config.pac_url,
+                   "ip_connect_interval":config.CONFIG.getint("google_ip", "ip_connect_interval")
+                   }
         data = json.dumps(res_arr)
 
         self.send_response('application/json', data)
@@ -378,6 +442,8 @@ class RemoteContralServerHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 user_config.proxy_port = self.postvars['proxy_port'][0]
                 user_config.proxy_user = self.postvars['proxy_user'][0]
                 user_config.proxy_passwd = self.postvars['proxy_passwd'][0]
+                user_config.host_appengine_mode = self.postvars['host_appengine_mode'][0]
+                user_config.ip_connect_interval = self.postvars['ip_connect_interval'][0]
                 user_config.save()
 
                 data = '{"res":"success"}'
@@ -400,15 +466,18 @@ class RemoteContralServerHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         time_now = datetime.datetime.today().strftime('%H:%M:%S-%a/%d/%b/%Y')
 
         if reqs['cmd'] == ['deploy']:
+            appid = self.postvars['appid'][0]
+
             if RemoteContralServerHandler.deploy_proc and RemoteContralServerHandler.deploy_proc.poll() == None:
                 logging.warn("deploy is running, request denied.")
                 data = '{"res":"deploy is running", "time":"%s"}' % (time_now)
+
             else:
                 try:
                     if os.path.isfile(log_path):
                         os.remove(log_path)
                     script_path = os.path.abspath(os.path.join(current_path, os.pardir, "server", 'uploader.py'))
-                    appid = self.postvars['appid'][0]
+
                     email = self.postvars['email'][0]
                     passwd = self.postvars['passwd'][0]
                     RemoteContralServerHandler.deploy_proc = subprocess.Popen([sys.executable, script_path, appid, email, passwd], stdout=subprocess.PIPE)
@@ -462,6 +531,12 @@ class RemoteContralServerHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
     def req_ssl_pool_handler(self):
         data = connect_manager.https_manager.conn_pool.to_string()
+
+        mimetype = 'text/plain'
+        self.send_response(mimetype, data)
+
+    def req_is_ready_handler(self):
+        data = "%s" % config.cert_import_ready
 
         mimetype = 'text/plain'
         self.send_response(mimetype, data)

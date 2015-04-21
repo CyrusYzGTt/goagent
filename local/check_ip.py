@@ -19,6 +19,7 @@ if __name__ == "__main__":
 import httplib
 import time
 import socket
+import threading
 
 current_path = os.path.dirname(os.path.abspath(__file__))
 
@@ -78,58 +79,63 @@ class Check_result():
         self.handshake_time = max_timeout
 
 class Check_frame(object):
-    def __init__(self, ip):
+    def __init__(self, ip, check_cert=True):
         self.result = Check_result()
         self.ip = ip
 
-    def check(self, callback=None, check_ca=False):
+        self.timeout = 5
+        self.check_cert = check_cert
+        if check_cert:
+            self.openssl_context = SSLConnection.context_builder(ssl_version="TLSv1", ca_certs=g_cacertfile) # check cacert cost too many cpu, 100 check thread cost 60%.
+        else:
+            self.openssl_context = SSLConnection.context_builder(ssl_version="TLSv1") #, ca_certs=g_cacertfile) # check cacert cost too many cpu, 100 check thread cost 60%.
 
-        timeout = 5
-        openssl_context = SSLConnection.context_builder(ssl_version="TLSv1") #, ca_certs=g_cacertfile) # check cacert cost too many cpu, 100 check thread cost 60%.
+    def connect_ssl(self, ip):
+        import struct
+        ip_port = (ip, 443)
+
+        if config.PROXY_ENABLE:
+            sock = socks.socksocket(socket.AF_INET)
+        else:
+            sock = socket.socket(socket.AF_INET)
+        # set reuseaddr option to avoid 10048 socket error
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # set struct linger{l_onoff=1,l_linger=0} to avoid 10048 socket error
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+        # resize socket recv buffer 8K->32K to improve browser releated application performance
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32*1024)
+        # disable negal algorithm to send http request quickly.
+        sock.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, True)
+        # set a short timeout to trigger timeout retry more quickly.
+        sock.settimeout(self.timeout)
+
+        ssl_sock = SSLConnection(self.openssl_context, sock)
+        ssl_sock.set_connect_state()
+
+        # pick up the certificate
+        #server_hostname = random_hostname() if (cache_key or '').startswith('google_') or hostname.endswith('.appspot.com') else None
+        #if server_hostname and hasattr(ssl_sock, 'set_tlsext_host_name'):
+        #    ssl_sock.set_tlsext_host_name(server_hostname)
+
+        time_begin = time.time()
+        ssl_sock.connect(ip_port)
+        time_connected = time.time()
+        ssl_sock.do_handshake()
+        time_handshaked = time.time()
+
+        self.result.connct_time = int((time_connected - time_begin) * 1000)
+        self.result.handshake_time = int((time_handshaked - time_connected) * 1000)
+        logging.debug("conn: %d  handshake:%d", self.result.connct_time, self.result.handshake_time)
+
+        # sometimes, we want to use raw tcp socket directly(select/epoll), so setattr it to ssl socket.
+        ssl_sock.sock = sock
+        return ssl_sock
+
+    def check(self, callback=None, check_ca=False, close_ssl=True):
 
         ssl_sock = None
         try:
-            def connect_ssl(ip):
-                import struct
-                ip_port = (ip, 443)
-
-                if config.PROXY_ENABLE:
-                    sock = socks.socksocket(socket.AF_INET)
-                else:
-                    sock = socket.socket(socket.AF_INET)
-                # set reuseaddr option to avoid 10048 socket error
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                # set struct linger{l_onoff=1,l_linger=0} to avoid 10048 socket error
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
-                # resize socket recv buffer 8K->32K to improve browser releated application performance
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32*1024)
-                # disable negal algorithm to send http request quickly.
-                sock.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, True)
-                # set a short timeout to trigger timeout retry more quickly.
-                sock.settimeout(timeout)
-
-                ssl_sock = SSLConnection(openssl_context, sock)
-                ssl_sock.set_connect_state()
-
-                # pick up the certificate
-                #server_hostname = random_hostname() if (cache_key or '').startswith('google_') or hostname.endswith('.appspot.com') else None
-                #if server_hostname and hasattr(ssl_sock, 'set_tlsext_host_name'):
-                #    ssl_sock.set_tlsext_host_name(server_hostname)
-
-                time_begin = time.time()
-                ssl_sock.connect(ip_port)
-                time_connected = time.time()
-                ssl_sock.do_handshake()
-                time_handshaked = time.time()
-
-                self.result.connct_time = int((time_connected - time_begin) * 1000)
-                self.result.handshake_time = int((time_handshaked - time_connected) * 1000)
-                logging.debug("conn: %d  handshake:%d", self.result.connct_time, self.result.handshake_time)
-
-                # sometimes, we want to use raw tcp socket directly(select/epoll), so setattr it to ssl socket.
-                ssl_sock.sock = sock
-                return ssl_sock
-            ssl_sock = connect_ssl(self.ip)
+            ssl_sock = self.connect_ssl(self.ip)
 
             # verify SSL certificate issuer.
             def check_ssl_cert(ssl_sock):
@@ -138,12 +144,12 @@ class Check_frame(object):
                     raise socket.error(' certficate is none')
 
                 issuer_commonname = next((v for k, v in cert.get_issuer().get_components() if k == 'CN'), '')
-                if not issuer_commonname.startswith('Google'):
+                if self.check_cert and not issuer_commonname.startswith('Google'):
                     raise socket.error(' certficate is issued by %r, not Google' % ( issuer_commonname))
 
 
                 ssl_cert = cert_util.SSLCert(cert)
-                logging.info("CN:%s", ssl_cert.cn)
+                logging.info("%s CN:%s", self.ip, ssl_cert.cn)
                 self.result.domain = ssl_cert.cn
             if check_ca:
                 check_ssl_cert(ssl_sock)
@@ -155,8 +161,9 @@ class Check_frame(object):
 
         except SSLError as e:
             logging.debug("Check_appengine %s SSLError:%s", self.ip, e)
+            pass
         except IOError as e:
-            logging.debug("Check %s IOError:%s", self.ip, e)
+            logging.warn("Check %s IOError:%s", self.ip, e)
             pass
         except httplib.BadStatusLine:
             #logging.debug('Check_appengine http.bad status line ip:%s', ip)
@@ -170,10 +177,21 @@ class Check_frame(object):
                 errno_str = e.message
             logging.debug('check_appengine %s %s err:%s', self.ip, errno_str, e)
         finally:
-            if ssl_sock:
+            if ssl_sock and close_ssl:
                 ssl_sock.close()
 
         return False
+
+def test_keepalive(ip_str, interval=5):
+    logging.info("==>%s", ip_str)
+    check = Check_frame(ip_str)
+    ssl = check.connect_ssl(ip_str)
+    result = test_app_head(ssl, ip_str)
+    print result
+    time.sleep(interval)
+    result = test_app_head(ssl, ip_str)
+    print result
+
 
 # each ssl connection must reuse by same host
 # therefor, different host need new ssl connection.
@@ -198,6 +216,29 @@ def test_server_type(ssl_sock, ip):
         response.close()
 
 
+def test_app_head(ssl_sock, ip):
+    request_data = 'HEAD /_gh/ HTTP/1.1\r\nHost: xxnet-100.appspot.com\r\n\r\n'
+    time_start = time.time()
+    ssl_sock.send(request_data.encode())
+    response = httplib.HTTPResponse(ssl_sock, buffering=True)
+    try:
+        response.begin()
+        status = response.status
+        if status != 200:
+            logging.debug("app check %s status:%d", ip, status)
+            raise Exception("app check fail")
+        return True
+        content = response.read()
+        if not content == "CHECK_OK":
+            logging.debug("app check %s content:%s", ip, content)
+            #raise Exception("content fail")
+    finally:
+        response.close()
+    time_stop = time.time()
+    time_cost = (time_stop - time_start)*1000
+    logging.debug("app check time:%d", time_cost)
+    return True
+
 def test_app_check(ssl_sock, ip):
     request_data = 'GET /check HTTP/1.1\r\nHost: xxnet-check.appspot.com\r\n\r\n'
     time_start = time.time()
@@ -220,12 +261,22 @@ def test_app_check(ssl_sock, ip):
     logging.debug("app check time:%d", time_cost)
     return True
 
+checking_lock = threading.Lock()
+checking_num = 0
 def network_is_ok():
+    global checking_lock, checking_num
+    if checking_num > 0:
+        return False
+
     if config.PROXY_ENABLE:
         socket.socket = socks.socksocket
         logging.debug("patch socks")
+
+    checking_lock.acquire()
+    checking_num += 1
+    checking_lock.release()
     try:
-        conn = httplib.HTTPSConnection("github.com", 443)
+        conn = httplib.HTTPSConnection("www.baidu.com", 443, timeout=3)
         header = {"user-agent": "Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36",
                   "accept":"application/json, text/javascript, */*; q=0.01",
                   "accept-encoding":"gzip, deflate, sdch",
@@ -239,10 +290,15 @@ def network_is_ok():
     except:
         pass
     finally:
+        checking_lock.acquire()
+        checking_num -= 1
+        checking_lock.release()
+
         if config.PROXY_ENABLE:
             socket.socket = default_socket
             logging.debug("restore socket")
 
+    logging.warn("network check to github fail.")
     return False
 
 def test_gws(ip_str):
@@ -257,13 +313,25 @@ def test_gws(ip_str):
 
     return check.result
 
+def test_gvs(ip_str):
+    #logging.info("%s", ip_str)
+    check = Check_frame(ip_str, check_cert=False)
+
+    result = check.check(callback=test_server_type, check_ca=True)
+    if not result or not "gvs" in result:
+        return False
+
+    check.result.server_type = result
+
+    return check.result
+
 
 def test_with_app(ip_str):
     #logging.info("==>%s", ip_str)
     check = Check_frame(ip_str)
 
     result = check.check(callback=test_app_check, check_ca=True)
-    logging.info("test %s app %s", ip_str, result)
+    logging.info("test_with_app %s app %s", ip_str, result)
 
 
 
@@ -323,8 +391,8 @@ class fast_search_ip():
         while self.check_num < 1000000:
             try:
                 time.sleep(1)
-                #ip_int = ip_range.get_ip()
-                ip_int = ip_range.random_get_ip()
+                ip_int = ip_range.get_ip()
+                #ip_int = ip_range.random_get_ip()
                 ip_str = ip_utils.ip_num_to_string(ip_int)
                 self.check_ip(ip_str)
             except Exception as e:
@@ -333,7 +401,7 @@ class fast_search_ip():
 
 
     def search_more_google_ip(self):
-        for i in range(50):
+        for i in range(20):
             p = threading.Thread(target = self.runJob)
             p.daemon = True
             p.start()
@@ -375,7 +443,8 @@ def check_all_exist_ip():
             handshake_time = int(str_l[3])
 
             logging.info("test ip: %s time:%d domain:%s server:%s", ip_str, handshake_time, domain, server)
-            test_with_app(ip_str)
+            #test_with_app(ip_str)
+            test_gws(ip_str)
             #self.add_ip(ip_str, handshake_time, domain, server)
         except Exception as e:
             logging.exception("load_ip line:%s err:%s", line, e)
@@ -385,12 +454,12 @@ def check_all_exist_ip():
 if __name__ == "__main__":
     #print network_is_ok()
     #print network_is_ok()
-    #test("208.117.224.103", 10) #gws
+    #test("216.58.220.86", 10) #gws
     #test('208.117.224.213', 10)
-    #test("218.176.242.24")
-    #test_main()
-    check_all_exist_ip()
-
+    #test("194.78.99.84")
+    test_multi_thread_search_ip()
+    #check_all_exist_ip()
+    #test_gws("210.158.146.245")
 
 # about ip connect time and handshake time
 # handshake time is double of connect time in common case.

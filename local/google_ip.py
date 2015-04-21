@@ -18,17 +18,18 @@ import os
 from config import config
 import traceback
 
+current_path = os.path.dirname(os.path.abspath(__file__))
 good_ip_file_name = "good_ip.txt"
 good_ip_file = os.path.abspath( os.path.join(config.DATA_PATH, good_ip_file_name))
+default_good_ip_fie = os.path.join(current_path, "good_ip.txt")
 
-
-# const value:
-max_check_ip_thread_num = 5
-max_good_ip_num = 4000  # stop scan ip when enough
-
+# get value from config:
+max_check_ip_thread_num = config.CONFIG.getint("google_ip", "max_check_ip_thread_num") #5
+max_good_ip_num = config.CONFIG.getint("google_ip", "max_good_ip_num") #4000  # stop scan ip when enough
+ip_connect_interval = config.CONFIG.getint("google_ip", "ip_connect_interval") #5,10
 
 class Check_ip():
-    ncount = 0
+    searching_thread_count = 0
     ncount_lock = threading.Lock()
 
     to_remove_ip_list = Queue.Queue()
@@ -69,14 +70,17 @@ class Check_ip():
     def __init__(self):
         self.load_ip()
 
-        if not self.is_ip_enough():
-            self.search_more_google_ip()
+        #if not self.is_ip_enough():
+        self.search_more_google_ip()
 
     def load_ip(self):
-        if not os.path.isfile(good_ip_file):
-            return
+        if os.path.isfile(good_ip_file):
+            file_path = good_ip_file
+        else:
+            file_path = default_good_ip_fie
 
-        with open(good_ip_file, "r") as fd:
+
+        with open(file_path, "r") as fd:
             lines = fd.readlines()
 
         for line in lines:
@@ -171,12 +175,9 @@ class Check_ip():
                     self.gws_ip_pointer = 0
                     self.gws_ip_pointer_reset_time = time.time()
 
-                #fastest_num = min(ip_num-1, 20)
-                #index = random.randint(0, fastest_num)
-                #index = get_random_pr(fastest_num)
                 ip_str = self.gws_ip_list[self.gws_ip_pointer]
                 get_time = self.ip_dict[ip_str]["get_time"]
-                if time.time() - get_time < 10:
+                if time.time() - get_time < ip_connect_interval:
                     self.gws_ip_pointer += 1
                     continue
                 handshake_time = self.ip_dict[ip_str]["handshake_time"]
@@ -296,10 +297,13 @@ class Check_ip():
 
     def report_connect_fail(self, ip_str, force_remove=False):
         # ignore if system network is disconnected.
-        if time.time() - self.network_fail_time < 3:
-            return
-        if not force_remove and not self.network_is_ok():
-            return
+        if not force_remove:
+            if time.time() - self.network_fail_time < 3:
+                logging.debug("report_connect_fail network fail recently")
+                return
+            if not self.network_is_ok():
+                logging.debug("report_connect_fail network fail")
+                return
 
         self.ip_lock.acquire()
         try:
@@ -307,7 +311,7 @@ class Check_ip():
                 return
 
             fail_time = self.ip_dict[ip_str]["fail_time"]
-            if time.time() - fail_time < 1:
+            if not force_remove and time.time() - fail_time < 1:
                 return
 
             # increase handshake_time to make it can be used in lower probability
@@ -326,10 +330,11 @@ class Check_ip():
 
                 logging.info("remove ip:%s left amount:%d gws_num:%d", ip_str, len(self.ip_dict), len(self.gws_ip_list))
 
-                self.to_remove_ip_list.put(ip_str)
-                self.try_remove_thread()
+                if not force_remove:
+                    self.to_remove_ip_list.put(ip_str)
+                    self.try_remove_thread()
         except Exception as e:
-            logging.error("set_ip err:%s", e)
+            logging.exception("set_ip err:%s", e)
         finally:
             self.ip_lock.release()
 
@@ -383,13 +388,41 @@ class Check_ip():
             return False
 
         if check_ip.network_is_ok():
+            logging.debug("network is ok")
             return True
 
         self.network_fail_time = time.time()
+        logging.debug("network is fail")
         return False
 
+    def remove_slowest_ip(self):
+        if len(self.gws_ip_list) <= max_good_ip_num:
+            return
 
+        self.try_sort_ip_by_handshake_time(force=True)
 
+        self.ip_lock.acquire()
+        try:
+            ip_num = len(self.gws_ip_list)
+            while ip_num > max_good_ip_num:
+
+                ip_str = self.gws_ip_list[ip_num - 1]
+
+                property = self.ip_dict[ip_str]
+                server = property['server']
+                handshake_time = property['handshake_time']
+                logging.info("remove_slowest_ip:%s handshake_time:%d", ip_str, handshake_time)
+                del self.ip_dict[ip_str]
+
+                if 'gws' in server and ip_str in self.gws_ip_list:
+                    self.gws_ip_list.remove(ip_str)
+
+                ip_num -= 1
+
+        except Exception as e:
+            logging.exception("remove_slowest_ip err:%s", e)
+        finally:
+            self.ip_lock.release()
 
     def check_ip(self, ip_str):
         result = check_ip.test_gws(ip_str)
@@ -404,25 +437,26 @@ class Check_ip():
         return True
 
     def runJob(self):
-        while not self.is_ip_enough():
+        while True: #not self.is_ip_enough() and self.searching_thread_count < 2:
             try:
                 time.sleep(1)
                 ip_int = ip_range.get_ip()
                 ip_str = ip_utils.ip_num_to_string(ip_int)
                 if self.check_ip(ip_str):
+                    self.remove_slowest_ip()
                     self.save_ip_list()
             except Exception as e:
-                logging.warn("google_ip.runJob fail:%s", e)
+                logging.exception("google_ip.runJob fail:%s", e)
 
         self.ncount_lock.acquire()
-        self.ncount -= 1
+        self.searching_thread_count -= 1
         self.ncount_lock.release()
 
     def search_more_google_ip(self):
 
-        while self.ncount < max_check_ip_thread_num:
+        while self.searching_thread_count < max_check_ip_thread_num:
             self.ncount_lock.acquire()
-            self.ncount += 1
+            self.searching_thread_count += 1
             self.ncount_lock.release()
             p = threading.Thread(target = self.runJob)
             p.daemon = True
@@ -443,7 +477,7 @@ class Check_ip():
                     return
 
                 logging.info("check_exist_ip fail ip:%s ", ip_str)
-                self.report_connect_fail(ip_str, force_remove=True)
+                self.report_connect_fail(ip_str)
             else:
                 self.update_ip(ip_str, result.handshake_time)
                 logging.info("check_exist_ip update ip:%s server:%s time:%d", ip_str, result.server_type, result.handshake_time)

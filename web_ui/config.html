@@ -1,15 +1,18 @@
 <h2>配置GoAgent</h2>
 <form id="form-goagent-config">
-    <input type="text" class="input-small" placeholder="appid" id="gae_appid">
-    <input type="password" class="input-small" placeholder="password" id="gae_passwd">
+    <input type="text" class="input-middle" placeholder="appid" id="gae_appid">
     清空将使用公共appid(<font color="red">公共appid不能看视频</font>)
+    建议申请自己的appid(<a href=" https://github.com/XX-net/XX-Net/wiki/Register-Google-appid" target="_blank">帮助</a>)
     <br>
-    建议申请自己的appid<a href=" https://github.com/XX-net/XX-Net/wiki/Register-Google-appid" target="_blank">帮助</a>
+    <input type="password" class="input-small" placeholder="RC4 password" id="gae_passwd">
+    一般不需要填
+    <br>
+
     <hr>
 
     <div class="checkbox">
         <label>
-            <input type="checkbox" id="proxy_enable"> 局域网代理（大部分情况不需要配置）<a href="https://github.com/XX-net/XX-Net/wiki/GoAgent-Intranet-proxy">帮助</a>
+            <input type="checkbox" id="proxy_enable"> 局域网代理（大部分情况不需要配置）<a href="https://github.com/XX-net/XX-Net/wiki/GoAgent-Intranet-proxy" target="_blank">帮助</a>
         </label>
     </div>
     <div id="proxy_detail" style="display:none";>
@@ -24,7 +27,21 @@
         <input type="text" class="input-small" placeholder="User name" id="proxy_user">
         <input type="password" class="input-small" placeholder="Password" id="proxy_passwd">
     </div>
-    <br>
+    <hr>
+    <details>
+        <summary>高级</summary>
+        <p>
+
+        <div class="checkbox">
+            <label>
+                <input type="checkbox" id="enable_appengine_gae">通过GAE进行部署<a href="https://github.com/XX-net/XX-Net/wiki/Deploy-By-GAE" target="_blank">帮助</a>
+            </label>
+        </div>
+        <br>
+        google ip 使用频率限制：<input type="text" class="input-small" placeholder="default 10" id="ip_connect_interval"><a href="https://github.com/XX-net/XX-Net/wiki/About-ip-connect-interval" target="_blank">帮助</a>
+        </p>
+    </details>
+
     <hr>
     <button type="submit" class="btn">保存并重启</button>
     <div id="status"></div>
@@ -38,6 +55,7 @@
         $( "#gae_passwd" ).val(data.passwd);
         if(data.proxy_enable == 1){
             $("#proxy_enable").prop('checked', true);
+            $('#proxy_detail').show();
         }else{
             $("#proxy_enable").prop('checked', false);
         }
@@ -46,6 +64,12 @@
         $("#proxy_port").val(data.proxy_port);
         $("#proxy_user").val(data.proxy_user);
         $("#proxy_passwd").val(data.proxy_passwd);
+        if(data.host_appengine_mode == "gae"){
+            $("#enable_appengine_gae").prop('checked', true);
+        }else{
+            $("#enable_appengine_gae").prop('checked', false);
+        }
+        $("#ip_connect_interval").val(data.ip_connect_interval);
     });
 
     $('#proxy_enable').click(function(data){
@@ -68,15 +92,23 @@
         }else{
             proxy_enable = 0;
         }
+        if($("#enable_appengine_gae").prop('checked')){
+            host_appengine_mode = "gae";
+        }else{
+            host_appengine_mode = "fwd";
+        }
         proxy_type = $("#proxy_type").val();
         proxy_host = $("#proxy_host").val();
         proxy_port = $("#proxy_port").val();
         proxy_user = $("#proxy_user").val();
         proxy_passwd = $("#proxy_passwd").val();
+        ip_connect_interval = $("#ip_connect_interval").val();
 
         $.post( "http://127.0.0.1:8084/config?cmd=set_config", {"appid":appid, "passwd": passwd,
                 "proxy_enable":proxy_enable, "proxy_type":proxy_type, "proxy_host":proxy_host, "proxy_port":proxy_port,
-                "proxy_user":proxy_user, "proxy_passwd":proxy_passwd,},
+                "proxy_user":proxy_user, "proxy_passwd":proxy_passwd,
+                "host_appengine_mode": host_appengine_mode,
+                "ip_connect_interval": ip_connect_interval},
             function( data ) {
 
             res = data.res

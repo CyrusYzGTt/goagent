@@ -10,6 +10,7 @@ import random
 import base64
 import hashlib
 import threading
+import subprocess
 
 import logging
 
@@ -29,6 +30,9 @@ if __name__ == "__main__":
     elif sys.platform == "linux" or sys.platform == "linux2":
         linux_lib = os.path.abspath( os.path.join(python_path, 'lib', 'linux'))
         sys.path.append(linux_lib)
+    elif sys.platform == "darwin":
+        darwin_lib = os.path.abspath( os.path.join(python_path, 'lib', 'darwin'))
+        sys.path.append(darwin_lib)
 
 import OpenSSL
 
@@ -36,6 +40,8 @@ import ssl, datetime
 from pyasn1.type import univ, constraint, char, namedtype, tag
 from pyasn1.codec.der.decoder import decode
 from pyasn1.error import PyAsn1Error
+
+from config import config
 
 class _GeneralName(univ.Choice):
     # We are only interested in dNSNames. We use a default handler to ignore
@@ -141,6 +147,7 @@ class CertUtil(object):
     ca_keyfile = os.path.join(data_path, 'CA.crt')
     ca_thumbprint = ''
     ca_certdir = os.path.join(data_path, 'certs')
+    ca_digest = 'sha1' if sys.platform == 'win32' and sys.getwindowsversion() < (6,) else 'sha256'
     ca_lock = threading.Lock()
 
     @staticmethod
@@ -154,9 +161,9 @@ class CertUtil(object):
         subj.localityName = 'Cernet'
         subj.organizationName = CertUtil.ca_vendor
         subj.organizationalUnitName = '%s Root' % CertUtil.ca_vendor
-        subj.commonName = '%s CA' % CertUtil.ca_vendor
+        subj.commonName = '%s XX-Net' % CertUtil.ca_vendor
         req.set_pubkey(key)
-        req.sign(key, 'sha1')
+        req.sign(key, CertUtil.ca_digest)
         ca = OpenSSL.crypto.X509()
         ca.set_serial_number(0)
         ca.gmtime_adj_notBefore(0)
@@ -164,11 +171,14 @@ class CertUtil(object):
         ca.set_issuer(req.get_subject())
         ca.set_subject(req.get_subject())
         ca.set_pubkey(req.get_pubkey())
-        ca.sign(key, 'sha1')
+        ca.sign(key, CertUtil.ca_digest)
+        #logging.debug("CA key:%s", key)
+        logging.info("create ca")
         return key, ca
 
     @staticmethod
     def generate_ca_file():
+        logging.info("generate CA file:%s", CertUtil.ca_keyfile)
         key, ca = CertUtil.create_ca()
         with open(CertUtil.ca_keyfile, 'wb') as fp:
             fp.write(OpenSSL.crypto.dump_certificate(OpenSSL.crypto.FILETYPE_PEM, ca))
@@ -206,7 +216,7 @@ class CertUtil(object):
             sans = [commonname] + [x for x in sans if x != commonname]
         #req.add_extensions([OpenSSL.crypto.X509Extension(b'subjectAltName', True, ', '.join('DNS: %s' % x for x in sans)).encode()])
         req.set_pubkey(pkey)
-        req.sign(pkey, 'sha1')
+        req.sign(pkey, CertUtil.ca_digest)
 
         cert = OpenSSL.crypto.X509()
         cert.set_version(2)
@@ -224,7 +234,7 @@ class CertUtil(object):
         else:
             sans = [commonname] + [s for s in sans if s != commonname]
         #cert.add_extensions([OpenSSL.crypto.X509Extension(b'subjectAltName', True, ', '.join('DNS: %s' % x for x in sans))])
-        cert.sign(key, 'sha1')
+        cert.sign(key, CertUtil.ca_digest)
 
         certfile = os.path.join(CertUtil.ca_certdir, commonname + '.crt')
         with open(certfile, 'wb') as fp:
@@ -298,6 +308,8 @@ class CertUtil(object):
                 import win32elevate
                 win32elevate.elevateAdminRun(os.path.abspath(__file__))
                 return True
+            #else:
+                #CertUtil.win32_notify(msg=u'Import GoAgent Ca finished, please restart browser.', title=u'Restart browser need.')
 
             return True if ret else False
 
@@ -417,13 +429,45 @@ class CertUtil(object):
         else:
             return True
 
+
+
+    @staticmethod
+    def import_mac_ca(common_name, certfile):
+        commonname = "GoAgent XX-Net"
+        ca_hash = CertUtil.ca_thumbprint.replace(':', '')
+
+        def get_exist_ca_sha1():
+            args = ['security', 'find-certificate', '-Z', '-a', '-c', commonname]
+            output = subprocess.check_output(args)
+            for line in output.splitlines(True):
+                if len(line) == 53 and line.startswith("SHA-1 hash:"):
+                    sha1_hash = line[12:52]
+                    return sha1_hash
+
+        exist_ca_sha1 = get_exist_ca_sha1()
+        if exist_ca_sha1 == ca_hash:
+            logging.info("GoAgent CA exist")
+            return
+
+        import_command = 'security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ../../../data/goagent/CA.crt'# % certfile.decode('utf-8')
+        if exist_ca_sha1:
+            delete_ca_command = 'security delete-certificate -Z %s' % exist_ca_sha1
+            exec_command = "%s;%s" % (delete_ca_command, import_command)
+        else:
+            exec_command = import_command
+
+        admin_command = """osascript -e 'do shell script "%s" with administrator privileges' """ % exec_command
+        cmd = admin_command.encode('utf-8')
+        logging.info("try auto import CA command:%s", cmd)
+        os.system(cmd)
+
     @staticmethod
     def import_ca(certfile):
-        commonname = "GoAgent CA - GoAgent"
+        commonname = "GoAgent XX-Net - GoAgent"
         if sys.platform.startswith('win'):
             CertUtil.import_windows_ca(commonname, certfile)
         elif sys.platform == 'darwin':
-            os.system(('security find-certificate -a -c "%s" | grep "%s" >/dev/null || security add-trusted-cert -d -r trustRoot -k "/Library/Keychains/System.keychain" "%s"' % (commonname, commonname, certfile.decode('utf-8'))).encode('utf-8'))
+            CertUtil.import_mac_ca(commonname, certfile)
         elif sys.platform.startswith('linux'):
             CertUtil.import_debian_ca(commonname, certfile)
             CertUtil.import_linux_firefox_ca(commonname, certfile)
@@ -438,7 +482,9 @@ class CertUtil(object):
 
         # Confirmed GoAgent CA exist
         if not os.path.exists(CertUtil.ca_keyfile):
-            # clean old site certs
+            logging.info("no CA file exist")
+
+            logging.info("clean old site certs")
             any(os.remove(x) for x in glob.glob(CertUtil.ca_certdir+'/*.crt')+glob.glob(CertUtil.ca_certdir+'/.*.crt'))
 
             if os.name == 'nt':
@@ -462,12 +508,25 @@ class CertUtil(object):
 
         CertUtil.import_ca(CertUtil.ca_keyfile)
 
+        # change the status,
+        # web_control /cert_import_status will return True, else return False
+        # launcher will wait ready to open browser and check update
+        config.cert_import_ready = True
 
 def test_del_ca():
     commonname = "GoAgent CA - GoAgent"
     cmd_line = 'certutil -L -d sql:$HOME/.pki/nssdb |grep "GoAgent" ||certutil -d sql:$HOME/.pki/nssdb -D -n "%s" ' % ( commonname)
     os.system(cmd_line)
 
+def test_cmd():
+    cmd = "pwd"
+    cmd = ['security', 'find-certificate', '-Z', '-a', '-c', 'GoAgent']
+    #cmd = ['security', 'find-certificate',]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+    out = proc.communicate()
+    print out[0]
+
 if __name__ == '__main__':
     CertUtil.init_ca()
     #test_del_ca()
+    #test_cmd()

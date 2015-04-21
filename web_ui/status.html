@@ -24,6 +24,9 @@
             <td>OS detail</td><td id="os_detail"></td>
         </tr>
         <tr>
+            <td>language</td><td id="language"></td>
+        </tr>
+        <tr>
             <td>architecture</td><td id="architecture"></td>
         </tr>
         <tr>
@@ -44,8 +47,17 @@
         <tr>
             <td>Proxy Listen</td><td id="proxy_listen"></td>
         </tr>
+        <tr hidden="true">
+            <td>Set appids</td><td  style="max-width:150px;word-wrap: break-word;" id="gae_appid"></td>
+        </tr>
         <tr>
-            <td>GAE appid</td><td  style="max-width:150px;word-wrap: break-word;" id="gae_appid"></td>
+            <td>working appids</td><td  style="max-width:150px;word-wrap: break-word;" id="working_appid"></td>
+        </tr>
+        <tr>
+            <td>Out of Quota appids</td><td  style="max-width:150px;word-wrap: break-word;" id="out_of_quota_appids"></td>
+        </tr>
+        <tr>
+            <td>Not Exist appids</td><td  style="max-width:150px;word-wrap: break-word;" id="not_exist_appids"></td>
         </tr>
         <tr>
             <td>PAC URL</td><td id="pac_url"></td>
@@ -53,11 +65,17 @@
         <tr>
             <td>Google IP</td><td id="gws_ip_num"></td>
         </tr>
+        <tr>
+            <td>connected link</td><td id="connected_link"></td>
+        </tr>
+        <tr>
+            <td>ip_connect_interval</td><td id="ip_connect_interval"></td>
+        </tr>
     </tbody>
 </table>
 
-<div><a href="https://github.com/XX-net/XX-Net/issues">报告问题</a>，请附上<a href="http://127.0.0.1:8085/?module=goagent&menu=status" target="_blank">状态页</a>信息和<a href="http://127.0.0.1:8085/?module=goagent&menu=logging" target="_blank">日志页</a>内容，方便分析问题。</div>
-
+<div>* <a href="https://github.com/XX-net/XX-Net/issues">报告问题</a>，请附上<a href="http://127.0.0.1:8085/?module=goagent&menu=status" target="_blank">状态页</a>信息和<a href="http://127.0.0.1:8085/?module=goagent&menu=logging" target="_blank">日志页</a>内容，方便分析问题。</div>
+<div>* 如果状态页显示空白，很可能GoAgent启动失败，请按<a href="https://github.com/XX-net/XX-Net/wiki/How-to-get-start-error-log" target="_blank">指引</a>查找问题原因。</div>
 <script src="/js/jquery-1.11.2.min.js"></script>
 <script src="/js/jquery.timer.js"></script>
 <script type="text/javascript">
@@ -68,6 +86,7 @@
             $('#os_version').html(data.os_version);
             $('#os_release').html(data.os_release);
             $('#os_detail').html(data.os_detail);
+            $('#language').html(data.language);
             $('#architecture').html(data.architecture);
             $('#browser').html(data.browser);
             $('#xxnet_version').html(data.xxnet_version);
@@ -77,12 +96,13 @@
             $('#proxy_listen').html(data.proxy_listen);
             $('#pac_url').html(data.pac_url);
             $("#gws_ip_num").html(data.gws_ip_num);
+            $("#connected_link").html(data.connected_link);
 
-            var appids = "";
-            $.each( data.gae_appid, function( key, val ) {
-                appids += val + "|";
-            });
-            $('#gae_appid').html(appids);
+            $('#gae_appid').html(data.gae_appid);
+            $('#working_appid').html(data.working_appid);
+            $('#out_of_quota_appids').html(data.out_of_quota_appids);
+            $('#not_exist_appids').html(data.not_exist_appids);
+            $('#ip_connect_interval').html(data.ip_connect_interval);
         });
     }
 

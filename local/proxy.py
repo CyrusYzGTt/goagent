@@ -51,7 +51,11 @@ if sys.platform == "win32":
 elif sys.platform == "linux" or sys.platform == "linux2":
     win32_lib = os.path.abspath( os.path.join(python_path, 'lib', 'linux'))
     sys.path.append(win32_lib)
-
+elif sys.platform == "darwin":
+    darwin_lib = os.path.abspath( os.path.join(python_path, 'lib', 'darwin'))
+    sys.path.append(darwin_lib)
+    extra_lib = "/System/Library/Frameworks/Python.framework/Versions/2.7/Extras/lib/python"
+    sys.path.append(extra_lib)
 
 import time
 import traceback
@@ -81,19 +85,9 @@ import web_control
 
 from config import config
 
+from gae_handler import spawn_later
 
 
-
-
-def spawn_later(seconds, target, *args, **kwargs):
-    def wrap(*args, **kwargs):
-        __import__('time').sleep(seconds)
-        try:
-            result = target(*args, **kwargs)
-        except:
-            result = None
-        return result
-    return __import__('thread').start_new_thread(wrap, args, kwargs)
 
 
 
@@ -235,6 +229,13 @@ def main():
     pre_start()
     logging.info(config.info())
 
+    CertUtil.init_ca()
+
+    server = LocalProxyServer((config.LISTEN_IP, config.LISTEN_PORT), proxy_handler.GAEProxyHandler)
+    p = threading.Thread(target=server.serve_forever)
+    p.setDaemon(True)
+    p.start()
+
     if config.PAC_ENABLE:
         server = LocalProxyServer((config.PAC_IP, config.PAC_PORT), pac_server.PACServerHandler)
         p = threading.Thread(target=server.serve_forever)
@@ -247,12 +248,6 @@ def main():
         p.setDaemon(True)
         p.start()
 
-    server = LocalProxyServer((config.LISTEN_IP, config.LISTEN_PORT), proxy_handler.GAEProxyHandler)
-    p = threading.Thread(target=server.serve_forever)
-    p.setDaemon(True)
-    p.start()
-
-    CertUtil.init_ca()
 
     while config.keep_run:
         time.sleep(1)

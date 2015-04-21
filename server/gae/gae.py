@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding:utf-8
 
-__version__ = '3.2.0'
+__version__ = '3.3.1'
 __password__ = ''
 __hostsdeny__ = ()
 #__hostsdeny__ = ('.youtube.com', '.youku.com', ".googlevideo.com")
@@ -166,7 +166,7 @@ def application(environ, start_response):
     netloc = urlparse.urlparse(url).netloc
 
     if __hostsdeny__ and netloc.endswith(__hostsdeny__):
-        yield format_response(403, {'Content-Type': 'text/html; charset=utf-8'}, message_html('403 Hosts Deny', 'Hosts Deny(%r)' % netloc, detail='url=%r' % url))
+        yield format_response(403, {'Content-Type': 'text/html; charset=utf-8'}, message_html('403 Hosts Deny', 'Hosts Deny(%r)' % netloc, detail='共用appid因为资源有限，限制观看视频和文件下载等消耗资源过多的访问，请使用自己的appid <a href=" https://github.com/XX-net/XX-Net/wiki/Register-Google-appid" target="_blank">帮助</a> '))
         raise StopIteration
 
     if len(url) > MAX_URL_LENGTH:
@@ -190,7 +190,7 @@ def application(environ, start_response):
     errors = []
     for i in xrange(int(kwargs.get('fetchmax', URLFETCH_MAX))):
         try:
-            response = urlfetch.fetch(url, body, fetchmethod, headers, allow_truncated=False, follow_redirects=False, deadline=timeout, validate_certificate=validate_certificate)
+            response = urlfetch.fetch(url, body, fetchmethod, headers, allow_truncated=True, follow_redirects=False, deadline=timeout, validate_certificate=validate_certificate)
             break
         except apiproxy_errors.OverQuotaError as e:
             time.sleep(5)
@@ -237,6 +237,7 @@ def application(environ, start_response):
     status_code = int(response.status_code)
     data = response.content
     response_headers = response.headers
+    response_headers['X-Head-Content-Length'] = response_headers.get('Content-Length', '')
     content_type = response_headers.get('content-type', '')
     if status_code == 200 and maxsize and len(data) > maxsize and response_headers.get('accept-ranges', '').lower() == 'bytes' and int(response_headers.get('content-length', 0)):
         status_code = 206

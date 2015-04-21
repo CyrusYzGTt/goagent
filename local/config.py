@@ -2,23 +2,16 @@
 # coding:utf-8
 
 
-
-
 import ConfigParser
 import os
 import sys
 import re
 import io
 import collections
-import fnmatch
-
-
 
 
 
 class Config(object):
-    """Global Config Object"""
-
     current_path = os.path.dirname(os.path.abspath(__file__))
 
     version = current_path.split(os.path.sep)[-2]
@@ -29,13 +22,15 @@ class Config(object):
 
     def load(self):
         """load config from proxy.ini"""
-
         current_path = os.path.dirname(os.path.abspath(__file__))
         ConfigParser.RawConfigParser.OPTCRE = re.compile(r'(?P<option>[^=\s][^=]*)\s*(?P<vi>[=])\s*(?P<value>.*)$')
         self.CONFIG = ConfigParser.ConfigParser()
         self.CONFIG_FILENAME = os.path.abspath( os.path.join(current_path, 'proxy.ini'))
 
         self.DATA_PATH = os.path.abspath( os.path.join(current_path, os.pardir, os.pardir, os.pardir, 'data', 'goagent'))
+        if not os.path.isdir(self.DATA_PATH):
+            self.DATA_PATH = current_path
+
         # load ../../../data/goagent/config.ini
         self.CONFIG_USER_FILENAME = os.path.abspath( os.path.join(self.DATA_PATH, 'config.ini'))
 
@@ -53,20 +48,30 @@ class Config(object):
         self.GAE_APPIDS = re.findall(r'[\w\-\.]+', self.CONFIG.get('gae', 'appid').replace('.appspot.com', ''))
         self.GAE_PASSWORD = self.CONFIG.get('gae', 'password').strip()
 
-        self.HOSTS_MAP = collections.OrderedDict((k, v or k) for k, v in self.CONFIG.items('hosts') if '\\' not in k and ':' not in k and not k.startswith('.'))
-        self.HOSTS_POSTFIX_MAP = collections.OrderedDict((k, v) for k, v in self.CONFIG.items('hosts') if '\\' not in k and ':' not in k and k.startswith('.'))
-        self.HOSTS_POSTFIX_ENDSWITH = tuple(self.HOSTS_POSTFIX_MAP)
+        fwd_endswith = []
+        fwd_hosts = []
+        gae_endswith = []
+        gae_hosts = []
+        for k, v in self.CONFIG.items('hosts'):
+            if v == "fwd":
+                if k.startswith('.'):
+                    fwd_endswith.append(k)
+                else:
+                    fwd_hosts.append(k)
+            else:
+                if k.startswith('.'):
+                    gae_endswith.append(k)
+                else:
+                    gae_hosts.append(k)
+        self.HOSTS_FWD_ENDSWITH = tuple(fwd_endswith)
+        self.HOSTS_FWD = tuple(fwd_hosts)
+        self.HOSTS_GAE_ENDSWITH = tuple(gae_endswith)
+        self.HOSTS_GAE = tuple(gae_hosts)
 
-        self.AUTORANGE_HOSTS = self.CONFIG.get('autorange', 'hosts').split('|')
-        self.AUTORANGE_HOSTS_MATCH = [re.compile(fnmatch.translate(h)).match for h in self.AUTORANGE_HOSTS]
-        self.AUTORANGE_ENDSWITH = tuple(self.CONFIG.get('autorange', 'endswith').split('|'))
-        self.AUTORANGE_NOENDSWITH = tuple(self.CONFIG.get('autorange', 'noendswith').split('|'))
         self.AUTORANGE_MAXSIZE = self.CONFIG.getint('autorange', 'maxsize')
         self.AUTORANGE_WAITSIZE = self.CONFIG.getint('autorange', 'waitsize')
         self.AUTORANGE_BUFSIZE = self.CONFIG.getint('autorange', 'bufsize')
         self.AUTORANGE_THREADS = self.CONFIG.getint('autorange', 'threads')
-
-        self.FETCHMAX_LOCAL = 3
 
         self.PAC_ENABLE = self.CONFIG.getint('pac', 'enable')
         self.PAC_IP = self.CONFIG.get('pac', 'ip')
@@ -92,11 +97,16 @@ class Config(object):
         self.PROXY_USER = self.CONFIG.get('proxy', 'user')
         self.PROXY_PASSWD = self.CONFIG.get('proxy', 'passwd')
 
-
         self.LOVE_ENABLE = self.CONFIG.getint('love', 'enable')
         self.LOVE_TIP = self.CONFIG.get('love', 'tip').encode('utf8').decode('unicode-escape').split('|')
 
+        # change to False when require http://127.0.0.1:8084/quit
+        # then GoAgent will quit
         self.keep_run = True
+
+        # change to True when finished import CA cert to browser
+        # launcher will wait import ready then open browser to show status, check update etc
+        self.cert_import_ready = False
 
     def info(self):
         info = ''
@@ -111,10 +121,19 @@ class Config(object):
         info += 'GAE APPID          : %s\n' % '|'.join(self.GAE_APPIDS)
         if self.PAC_ENABLE:
             info += 'Pac Server         : http://%s:%d/%s\n' % (self.PAC_IP, self.PAC_PORT, self.PAC_FILE)
-            info += 'Pac File           : file://%s\n' % os.path.join(os.path.dirname(os.path.abspath(__file__)), self.PAC_FILE).replace('\\', '/')
+            #info += 'Pac File           : file://%s\n' % os.path.join(self.DATA_PATH, self.PAC_FILE)
         info += '------------------------------------------------------\n'
         return info
 
 
 config = Config()
 config.load()
+
+
+def test():
+    hosts = ['google.com']
+    if 'www.google.com' in hosts:
+        print "in ."
+
+if __name__ == "__main__":
+    test()
